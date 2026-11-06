@@ -1,0 +1,419 @@
+// CLAP 1.2 bindings for galayalang.
+//
+// Struct layouts mirror the C headers field-for-field (natural alignment), so
+// they can be passed straight to/from the host. Two renames to dodge possible
+// keywords: `type` -> `kind` (events) and `module` -> `module_path` (params).
+//
+// ASSUMPTIONS (change in one place here if wrong):
+//   - u16/u32/u64/i16 exist (u8 is `byte`), `bool` is 1 byte
+//   - `fn` values/pointers use the C calling convention
+//   - null pointer is `0`
+
+@if(WINDOWS) {
+    import "core/core_windows.gala";
+    import "core/mem_windows.gala";
+} else {
+    import "core/core_posix.gala";
+    import "core/mem_posix.gala";
+}
+
+// ============================================================
+// Constants
+// ============================================================
+
+CLAP_VERSION_MAJOR    :: 1;
+CLAP_VERSION_MINOR    :: 2;
+CLAP_VERSION_REVISION :: 2;
+
+CLAP_NAME_SIZE  :: 256;
+CLAP_PATH_SIZE  :: 1024;
+CLAP_INVALID_ID :: 0xFFFFFFFF;
+
+// clap_process_status
+CLAP_PROCESS_ERROR                :: 0;
+CLAP_PROCESS_CONTINUE             :: 1;
+CLAP_PROCESS_CONTINUE_IF_NOT_QUIET :: 2;
+CLAP_PROCESS_TAIL                 :: 3;
+CLAP_PROCESS_SLEEP                :: 4;
+
+// event spaces / kinds
+CLAP_CORE_EVENT_SPACE_ID :: 0;
+
+CLAP_EVENT_NOTE_ON              :: 0;
+CLAP_EVENT_NOTE_OFF             :: 1;
+CLAP_EVENT_NOTE_CHOKE           :: 2;
+CLAP_EVENT_NOTE_END             :: 3;
+CLAP_EVENT_NOTE_EXPRESSION      :: 4;
+CLAP_EVENT_PARAM_VALUE          :: 5;
+CLAP_EVENT_PARAM_MOD            :: 6;
+CLAP_EVENT_PARAM_GESTURE_BEGIN  :: 7;
+CLAP_EVENT_PARAM_GESTURE_END    :: 8;
+CLAP_EVENT_TRANSPORT            :: 9;
+CLAP_EVENT_MIDI                 :: 10;
+CLAP_EVENT_MIDI_SYSEX           :: 11;
+CLAP_EVENT_MIDI2                :: 12;
+
+// clap_event_flags
+CLAP_EVENT_IS_LIVE        :: 1 << 0;
+CLAP_EVENT_DONT_RECORD    :: 1 << 1;
+
+// clap_transport_flags
+CLAP_TRANSPORT_HAS_TEMPO            :: 1 << 0;
+CLAP_TRANSPORT_HAS_BEATS_TIMELINE   :: 1 << 1;
+CLAP_TRANSPORT_HAS_SECONDS_TIMELINE :: 1 << 2;
+CLAP_TRANSPORT_HAS_TIME_SIGNATURE   :: 1 << 3;
+CLAP_TRANSPORT_IS_PLAYING           :: 1 << 4;
+CLAP_TRANSPORT_IS_RECORDING         :: 1 << 5;
+CLAP_TRANSPORT_IS_LOOP_ACTIVE       :: 1 << 6;
+CLAP_TRANSPORT_IS_WITHIN_PRE_ROLL   :: 1 << 7;
+
+// audio port flags
+CLAP_AUDIO_PORT_IS_MAIN                     :: 1 << 0;
+CLAP_AUDIO_PORT_SUPPORTS_64BITS             :: 1 << 1;
+CLAP_AUDIO_PORT_PREFERS_64BITS              :: 1 << 2;
+CLAP_AUDIO_PORT_REQUIRES_COMMON_SAMPLE_SIZE :: 1 << 3;
+
+// note dialects
+CLAP_NOTE_DIALECT_CLAP     :: 1 << 0;
+CLAP_NOTE_DIALECT_MIDI     :: 1 << 1;
+CLAP_NOTE_DIALECT_MIDI_MPE :: 1 << 2;
+CLAP_NOTE_DIALECT_MIDI2    :: 1 << 3;
+
+// param info flags
+CLAP_PARAM_IS_STEPPED                  :: 1 << 0;
+CLAP_PARAM_IS_PERIODIC                 :: 1 << 1;
+CLAP_PARAM_IS_HIDDEN                   :: 1 << 2;
+CLAP_PARAM_IS_READONLY                 :: 1 << 3;
+CLAP_PARAM_IS_BYPASS                   :: 1 << 4;
+CLAP_PARAM_IS_AUTOMATABLE              :: 1 << 5;
+CLAP_PARAM_IS_AUTOMATABLE_PER_NOTE_ID  :: 1 << 6;
+CLAP_PARAM_IS_AUTOMATABLE_PER_KEY      :: 1 << 7;
+CLAP_PARAM_IS_AUTOMATABLE_PER_CHANNEL  :: 1 << 8;
+CLAP_PARAM_IS_AUTOMATABLE_PER_PORT     :: 1 << 9;
+CLAP_PARAM_IS_MODULATABLE              :: 1 << 10;
+CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID  :: 1 << 11;
+CLAP_PARAM_IS_MODULATABLE_PER_KEY      :: 1 << 12;
+CLAP_PARAM_IS_MODULATABLE_PER_CHANNEL  :: 1 << 13;
+CLAP_PARAM_IS_MODULATABLE_PER_PORT     :: 1 << 14;
+CLAP_PARAM_REQUIRES_PROCESS            :: 1 << 15;
+CLAP_PARAM_IS_ENUM                     :: 1 << 16;
+
+// ============================================================
+// Core types
+// ============================================================
+
+struct ClapVersion {
+    major, minor, revision: u32,
+}
+
+struct ClapEventHeader {
+    size: u32,
+    time: u32,
+    space_id: u16,
+    kind: u16,
+    flags: u32,
+}
+
+struct ClapEventNote {
+    header: ClapEventHeader,
+    note_id: i32,
+    port_index: i16,
+    channel: i16,
+    key: i16,
+    velocity: f64,
+}
+
+struct ClapEventNoteExpression {
+    header: ClapEventHeader,
+    expression_id: i32,
+    note_id: i32,
+    port_index: i16,
+    channel: i16,
+    key: i16,
+    value: f64,
+}
+
+struct ClapEventParamValue {
+    header: ClapEventHeader,
+    param_id: u32,
+    cookie: rawptr,
+    note_id: i32,
+    port_index: i16,
+    channel: i16,
+    key: i16,
+    value: f64,
+}
+
+struct ClapEventParamMod {
+    header: ClapEventHeader,
+    param_id: u32,
+    cookie: rawptr,
+    note_id: i32,
+    port_index: i16,
+    channel: i16,
+    key: i16,
+    amount: f64,
+}
+
+struct ClapEventMidi {
+    header: ClapEventHeader,
+    port_index: u16,
+    data: [3]byte,
+}
+
+struct ClapEventTransport {
+    header: ClapEventHeader,
+    flags: u32,
+    song_pos_beats: i64,     // fixed point 31.31
+    song_pos_seconds: i64,   // fixed point 31.31
+    tempo: f64,
+    tempo_inc: f64,
+    loop_start_beats: i64,
+    loop_end_beats: i64,
+    loop_start_seconds: i64,
+    loop_end_seconds: i64,
+    bar_start: i64,
+    bar_number: i32,
+    tsig_num: u16,
+    tsig_denom: u16,
+}
+
+struct ClapInputEvents {
+    ctx: rawptr,
+    size: fn(list: ^ClapInputEvents): u32,
+    get: fn(list: ^ClapInputEvents, index: u32): ^ClapEventHeader,
+}
+
+struct ClapOutputEvents {
+    ctx: rawptr,
+    try_push: fn(list: ^ClapOutputEvents, event: ^ClapEventHeader): bool,
+}
+
+struct ClapAudioBuffer {
+    data32: ^^f32,           // data32[channel][frame], or 0
+    data64: ^^f64,           // or 0
+    channel_count: u32,
+    latency: u32,
+    constant_mask: u64,
+}
+
+struct ClapProcess {
+    steady_time: i64,        // -1 if unavailable
+    frames_count: u32,
+    transport: ^ClapEventTransport,   // may be 0
+    audio_inputs: ^ClapAudioBuffer,
+    audio_outputs: ^ClapAudioBuffer,
+    audio_inputs_count: u32,
+    audio_outputs_count: u32,
+    in_events: ^ClapInputEvents,
+    out_events: ^ClapOutputEvents,
+}
+
+struct ClapHost {
+    clap_version: ClapVersion,
+    host_data: rawptr,
+    name: ^byte,
+    vendor: ^byte,
+    url: ^byte,
+    version: ^byte,
+    get_extension: fn(host: ^ClapHost, extension_id: ^byte): rawptr,
+    request_restart: fn(host: ^ClapHost),
+    request_process: fn(host: ^ClapHost),
+    request_callback: fn(host: ^ClapHost),
+}
+
+struct ClapPluginDescriptor {
+    clap_version: ClapVersion,
+    id: ^byte,
+    name: ^byte,
+    vendor: ^byte,
+    url: ^byte,
+    manual_url: ^byte,
+    support_url: ^byte,
+    version: ^byte,
+    description: ^byte,
+    features: ^^byte,        // 0-terminated array of C strings
+}
+
+struct ClapPlugin {
+    desc: ^ClapPluginDescriptor,
+    plugin_data: rawptr,
+    init: fn(plugin: ^ClapPlugin): bool,
+    destroy: fn(plugin: ^ClapPlugin),
+    activate: fn(plugin: ^ClapPlugin, sample_rate: f64, min_frames: u32, max_frames: u32): bool,
+    deactivate: fn(plugin: ^ClapPlugin),
+    start_processing: fn(plugin: ^ClapPlugin): bool,
+    stop_processing: fn(plugin: ^ClapPlugin),
+    reset: fn(plugin: ^ClapPlugin),
+    process: fn(plugin: ^ClapPlugin, process: ^ClapProcess): i32,
+    get_extension: fn(plugin: ^ClapPlugin, id: ^byte): rawptr,
+    on_main_thread: fn(plugin: ^ClapPlugin),
+}
+
+struct ClapPluginFactory {
+    get_plugin_count: fn(factory: ^ClapPluginFactory): u32,
+    get_plugin_descriptor: fn(factory: ^ClapPluginFactory, index: u32): ^ClapPluginDescriptor,
+    create_plugin: fn(factory: ^ClapPluginFactory, host: ^ClapHost, plugin_id: ^byte): ^ClapPlugin,
+}
+
+// The exported `clap_entry` symbol must be one of these.
+struct ClapPluginEntry {
+    clap_version: ClapVersion,
+    init: fn(plugin_path: ^byte): bool,
+    deinit: fn(),
+    get_factory: fn(factory_id: ^byte): rawptr,
+}
+
+// ============================================================
+// Extensions
+// ============================================================
+
+// ---- clap.audio-ports ----
+struct ClapAudioPortInfo {
+    id: u32,
+    name: [256]byte,
+    flags: u32,
+    channel_count: u32,
+    port_type: ^byte,        // CLAP_PORT_MONO / CLAP_PORT_STEREO / 0
+    in_place_pair: u32,      // CLAP_INVALID_ID if none
+}
+
+struct ClapPluginAudioPorts {
+    count: fn(plugin: ^ClapPlugin, is_input: bool): u32,
+    get: fn(plugin: ^ClapPlugin, index: u32, is_input: bool, info: ^ClapAudioPortInfo): bool,
+}
+
+// ---- clap.note-ports ----
+struct ClapNotePortInfo {
+    id: u32,
+    supported_dialects: u32,
+    preferred_dialect: u32,
+    name: [256]byte,
+}
+
+struct ClapPluginNotePorts {
+    count: fn(plugin: ^ClapPlugin, is_input: bool): u32,
+    get: fn(plugin: ^ClapPlugin, index: u32, is_input: bool, info: ^ClapNotePortInfo): bool,
+}
+
+// ---- clap.params ----
+struct ClapParamInfo {
+    id: u32,
+    flags: u32,
+    cookie: rawptr,
+    name: [256]byte,
+    module_path: [1024]byte,   // "a/b/c" grouping, empty string for none
+    min_value: f64,
+    max_value: f64,
+    default_value: f64,
+}
+
+struct ClapPluginParams {
+    count: fn(plugin: ^ClapPlugin): u32,
+    get_info: fn(plugin: ^ClapPlugin, param_index: u32, info: ^ClapParamInfo): bool,
+    get_value: fn(plugin: ^ClapPlugin, param_id: u32, out_value: ^f64): bool,
+    value_to_text: fn(plugin: ^ClapPlugin, param_id: u32, value: f64, out_buffer: ^byte, capacity: u32): bool,
+    text_to_value: fn(plugin: ^ClapPlugin, param_id: u32, text: ^byte, out_value: ^f64): bool,
+    flush: fn(plugin: ^ClapPlugin, in_events: ^ClapInputEvents, out_events: ^ClapOutputEvents),
+}
+
+// host side of clap.params
+struct ClapHostParams {
+    rescan: fn(host: ^ClapHost, flags: u32),
+    clear: fn(host: ^ClapHost, param_id: u32, flags: u32),
+    request_flush: fn(host: ^ClapHost),
+}
+
+// ---- clap.state ----
+struct ClapIStream {
+    ctx: rawptr,
+    read: fn(stream: ^ClapIStream, buffer: rawptr, size: u64): i64,    // 0 = EOF, <0 = error
+}
+
+struct ClapOStream {
+    ctx: rawptr,
+    write: fn(stream: ^ClapOStream, buffer: rawptr, size: u64): i64,   // <0 = error
+}
+
+struct ClapPluginState {
+    save: fn(plugin: ^ClapPlugin, stream: ^ClapOStream): bool,
+    load: fn(plugin: ^ClapPlugin, stream: ^ClapIStream): bool,
+}
+
+// ============================================================
+// ID strings (C strings), filled by clap_bindings_init()
+// Call clap_bindings_init() from your entry `init`.
+// ============================================================
+
+CLAP_PLUGIN_FACTORY_ID := cast(^byte)0;
+
+CLAP_EXT_AUDIO_PORTS := cast(^byte)0;
+CLAP_EXT_NOTE_PORTS  := cast(^byte)0;
+CLAP_EXT_PARAMS      := cast(^byte)0;
+CLAP_EXT_STATE       := cast(^byte)0;
+
+CLAP_PORT_MONO   := cast(^byte)0;
+CLAP_PORT_STEREO := cast(^byte)0;
+
+fn clap_bindings_init() {
+    a := base_allocator;
+    CLAP_PLUGIN_FACTORY_ID = clone_cstring("clap.plugin-factory", a);
+    CLAP_EXT_AUDIO_PORTS   = clone_cstring("clap.audio-ports", a);
+    CLAP_EXT_NOTE_PORTS    = clone_cstring("clap.note-ports", a);
+    CLAP_EXT_PARAMS        = clone_cstring("clap.params", a);
+    CLAP_EXT_STATE         = clone_cstring("clap.state", a);
+    CLAP_PORT_MONO         = clone_cstring("mono", a);
+    CLAP_PORT_STEREO       = clone_cstring("stereo", a);
+}
+
+// ============================================================
+// Helpers
+// ============================================================
+
+fn clap_version_is_compatible(v: ClapVersion): bool {
+    return v.major >= 1;
+}
+
+// C string equality (both 0-terminated, either may be 0)
+fn clap_cstr_eq(a: ^byte, b: ^byte): bool {
+    if a == 0 || b == 0 {
+        return a == b;
+    }
+    i := 0;
+    while a[i] == b[i] {
+        if a[i] == 0 { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+// copy a C string into a fixed char buffer, always 0-terminated
+fn clap_copy_cstr(dst: ^byte, cap: int, src: ^byte) {
+    i := 0;
+    while i < cap - 1 && src[i] != 0 {
+        dst[i] = src[i];
+        i += 1;
+    }
+    dst[i] = 0;
+}
+
+fn clap_events_size(l: ^ClapInputEvents): int {
+    return cast(int)l^.size(l);
+}
+
+fn clap_events_get(l: ^ClapInputEvents, index: int): ^ClapEventHeader {
+    return l^.get(l, cast(u32)index);
+}
+
+fn clap_events_push(l: ^ClapOutputEvents, e: ^ClapEventHeader): bool {
+    return l^.try_push(l, e);
+}
+
+fn clap_host_request_callback(h: ^ClapHost) { h^.request_callback(h); }
+fn clap_host_request_process(h: ^ClapHost)  { h^.request_process(h); }
+fn clap_host_request_restart(h: ^ClapHost)  { h^.request_restart(h); }
+
+// ask the host for an extension; returns 0 if unsupported
+fn clap_host_ext(h: ^ClapHost, id: ^byte): rawptr {
+    return h^.get_extension(h, id);
+}

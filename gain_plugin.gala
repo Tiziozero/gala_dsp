@@ -1,0 +1,297 @@
+// Minimal stereo gain CLAP plugin, to show how the bindings fit together.
+// Build as a shared library and name/copy it `something.clap`.
+PI :: 3.14159265358979323846;
+@if(WINDOWS) {
+    import "core/core_windows.gala";
+    import "core/mem_windows.gala";
+    import "core/cfunctions_windows.gala";
+} else {
+    import "core/core_posix.gala";
+    import "core/mem_posix.gala";
+    import "core/cfunctions_posix.gala";
+}
+import "./clap.gala";
+
+struct Gain {
+    gain: f64,          // linear, 0..2
+    sample_rate: f64,
+}
+
+PARAM_GAIN :: 0;
+
+// ---- descriptor strings (filled in entry init) ----
+gain_desc := ClapPluginDescriptor{
+    clap_version = ClapVersion{CLAP_VERSION_MAJOR, CLAP_VERSION_MINOR, CLAP_VERSION_REVISION},
+    id          = cast(^byte)0,
+    name        = cast(^byte)0,
+    vendor      = cast(^byte)0,
+    url         = cast(^byte)0,
+    manual_url  = cast(^byte)0,
+    support_url = cast(^byte)0,
+    version     = cast(^byte)0,
+    description = cast(^byte)0,
+    features    = cast(^^byte)0,
+};
+gain_features := [3]^byte{};
+gain_port_name  := cast(^byte)0;
+gain_param_name := cast(^byte)0;
+
+fn gain_setup_strings() {
+    a := base_allocator;
+    gain_desc.clap_version = ClapVersion{CLAP_VERSION_MAJOR, CLAP_VERSION_MINOR, CLAP_VERSION_REVISION};
+    gain_desc.id          = clone_cstring("com.example.galayalang.gain", a);
+    gain_desc.name        = clone_cstring("Galaya Gain", a);
+    gain_desc.vendor      = clone_cstring("example", a);
+    gain_desc.url         = clone_cstring("", a);
+    gain_desc.manual_url  = clone_cstring("", a);
+    gain_desc.support_url = clone_cstring("", a);
+    gain_desc.version     = clone_cstring("0.1.0", a);
+    gain_desc.description = clone_cstring("Simple gain written in galayalang", a);
+
+    gain_features[0] = clone_cstring("audio-effect", a);
+    gain_features[1] = clone_cstring("utility", a);
+    gain_features[2] = cast(^byte)0;
+    gain_desc.features = &gain_features[0];
+
+    gain_port_name  = clone_cstring("Main", a);
+    gain_param_name = clone_cstring("Gain", a);
+}
+
+// ============================================================
+// Audio ports: one stereo in, one stereo out
+// ============================================================
+
+fn ap_count(p: ^ClapPlugin, is_input: bool): u32 { return 1; }
+
+fn ap_get(p: ^ClapPlugin, index: u32, is_input: bool, info: ^ClapAudioPortInfo): bool {
+    if index != 0 { return false; }
+    info^.id = 0;
+    clap_copy_cstr(&info^.name[0], CLAP_NAME_SIZE, gain_port_name);
+    info^.flags = cast(u32)CLAP_AUDIO_PORT_IS_MAIN;
+    info^.channel_count = 2;
+    info^.port_type = CLAP_PORT_STEREO;
+    info^.in_place_pair = cast(u32)CLAP_INVALID_ID;
+    return true;
+}
+
+gain_audio_ports := ClapPluginAudioPorts{ count = ap_count, get = ap_get };
+
+// ============================================================
+// Params
+// ============================================================
+
+fn pr_count(p: ^ClapPlugin): u32 { return 1; }
+
+fn pr_get_info(p: ^ClapPlugin, index: u32, info: ^ClapParamInfo): bool {
+    if index != 0 { return false; }
+    info^.id = cast(u32)PARAM_GAIN;
+    info^.flags = cast(u32)CLAP_PARAM_IS_AUTOMATABLE;
+    info^.cookie = cast(rawptr)0;
+    clap_copy_cstr(&info^.name[0], CLAP_NAME_SIZE, gain_param_name);
+    info^.module_path[0] = 0;
+    info^.min_value = 0.0;
+    info^.max_value = 2.0;
+    info^.default_value = 1.0;
+    return true;
+}
+
+fn pr_get_value(p: ^ClapPlugin, id: u32, out_value: ^f64): bool {
+    if id != PARAM_GAIN { return false; }
+    g := cast(^Gain)p^.plugin_data;
+    out_value^ = g^.gain;
+    return true;
+}
+
+// returning false = host formats the raw value itself
+fn pr_value_to_text(p: ^ClapPlugin, id: u32, value: f64, out_buffer: ^byte, capacity: u32): bool {
+    return false;
+}
+
+fn pr_text_to_value(p: ^ClapPlugin, id: u32, text: ^byte, out_value: ^f64): bool {
+    return false;
+}
+
+fn gain_handle_event(g: ^Gain, h: ^ClapEventHeader) {
+    if h^.space_id != CLAP_CORE_EVENT_SPACE_ID { return; }
+    if h^.kind == CLAP_EVENT_PARAM_VALUE {
+        e := cast(^ClapEventParamValue)h;
+        if e^.param_id == PARAM_GAIN {
+            g^.gain = e^.value;
+        }
+    }
+}
+
+// used when the host changes params while we're not processing
+fn pr_flush(p: ^ClapPlugin, in_events: ^ClapInputEvents, out_events: ^ClapOutputEvents) {
+    g := cast(^Gain)p^.plugin_data;
+    n := clap_events_size(in_events);
+    i := 0;
+    while i < n {
+        gain_handle_event(g, clap_events_get(in_events, i));
+        i += 1;
+    }
+}
+
+gain_params := ClapPluginParams{
+    count = pr_count,
+    get_info = pr_get_info,
+    get_value = pr_get_value,
+    value_to_text = pr_value_to_text,
+    text_to_value = pr_text_to_value,
+    flush = pr_flush,
+};
+
+// ============================================================
+// State: just the gain as a raw f64
+// ============================================================
+
+fn st_save(p: ^ClapPlugin, stream: ^ClapOStream): bool {
+    g := cast(^Gain)p^.plugin_data;
+    v := g^.gain;
+    n := stream^.write(stream, cast(rawptr)&v, 8);
+    return n == 8;
+}
+
+fn st_load(p: ^ClapPlugin, stream: ^ClapIStream): bool {
+    g := cast(^Gain)p^.plugin_data;
+    v: f64 = 0.0;
+    n := stream^.read(stream, cast(rawptr)&v, 8);
+    if n != 8 { return false; }
+    g^.gain = v;
+    return true;
+}
+
+gain_state := ClapPluginState{ save = st_save, load = st_load };
+
+// ============================================================
+// Plugin
+// ============================================================
+
+fn gp_init(p: ^ClapPlugin): bool { return true; }
+
+fn gp_destroy(p: ^ClapPlugin) {
+    free(p^.plugin_data);
+    free(cast(rawptr)p);
+}
+
+fn gp_activate(p: ^ClapPlugin, sample_rate: f64, min_frames: u32, max_frames: u32): bool {
+    g := cast(^Gain)p^.plugin_data;
+    g^.sample_rate = sample_rate;
+    return true;
+}
+
+fn gp_deactivate(p: ^ClapPlugin) {}
+fn gp_start_processing(p: ^ClapPlugin): bool { return true; }
+fn gp_stop_processing(p: ^ClapPlugin) {}
+fn gp_reset(p: ^ClapPlugin) {}
+fn gp_on_main_thread(p: ^ClapPlugin) {}
+
+fn gp_process(p: ^ClapPlugin, proc: ^ClapProcess): i32 {
+    g := cast(^Gain)p^.plugin_data;
+
+    if proc^.audio_inputs_count < 1 || proc^.audio_outputs_count < 1 {
+        return CLAP_PROCESS_ERROR;
+    }
+
+    inp := proc^.audio_inputs;
+    out := proc^.audio_outputs;
+    frames := cast(int)proc^.frames_count;
+    chans := cast(int)out^.channel_count;
+    if cast(int)inp^.channel_count < chans { chans = cast(int)inp^.channel_count; }
+
+    n := clap_events_size(proc^.in_events);
+    ei := 0;
+    i := 0;
+
+    // sample-accurate: apply every event scheduled at or before this frame
+    while i < frames {
+        while ei < n {
+            h := clap_events_get(proc^.in_events, ei);
+            if cast(int)h^.time > i { break; }
+            gain_handle_event(g, h);
+            ei += 1;
+        }
+
+        gv := cast(f32)g^.gain * 10;
+        c := 0;
+        while c < chans {
+            // works in place too (input and output may be the same buffer)
+            out^.data32[c][i] = sinf(PI/2 * atanf(gv* atanf(gv* gv*atanf(inp^.data32[c][i] * gv * gv)))*2/PI);
+            c += 1;
+        }
+        i += 1;
+    }
+
+    return CLAP_PROCESS_CONTINUE;
+}
+
+fn gp_get_extension(p: ^ClapPlugin, id: ^byte): rawptr {
+    if clap_cstr_eq(id, CLAP_EXT_AUDIO_PORTS) { return cast(rawptr)&gain_audio_ports; }
+    if clap_cstr_eq(id, CLAP_EXT_PARAMS)      { return cast(rawptr)&gain_params; }
+    if clap_cstr_eq(id, CLAP_EXT_STATE)       { return cast(rawptr)&gain_state; }
+    return cast(rawptr)0;
+}
+
+// ============================================================
+// Factory
+// ============================================================
+
+fn pf_count(f: ^ClapPluginFactory): u32 { return 1; }
+
+fn pf_descriptor(f: ^ClapPluginFactory, index: u32): ^ClapPluginDescriptor {
+    if index != 0 { return 0; }
+    return &gain_desc;
+}
+
+fn pf_create(f: ^ClapPluginFactory, host: ^ClapHost, plugin_id: ^byte): ^ClapPlugin {
+    if !clap_version_is_compatible(host^.clap_version) { return 0; }
+    if !clap_cstr_eq(plugin_id, gain_desc.id) { return 0; }
+
+    g := new::<Gain>();
+    g^.gain = 1.0;
+    g^.sample_rate = 44100.0;
+
+    p := new::<ClapPlugin>();
+    p^.desc = &gain_desc;
+    p^.plugin_data = cast(rawptr)g;
+    p^.init = gp_init;
+    p^.destroy = gp_destroy;
+    p^.activate = gp_activate;
+    p^.deactivate = gp_deactivate;
+    p^.start_processing = gp_start_processing;
+    p^.stop_processing = gp_stop_processing;
+    p^.reset = gp_reset;
+    p^.process = gp_process;
+    p^.get_extension = gp_get_extension;
+    p^.on_main_thread = gp_on_main_thread;
+    return p;
+}
+
+gain_factory := ClapPluginFactory{
+    get_plugin_count = pf_count,
+    get_plugin_descriptor = pf_descriptor,
+    create_plugin = pf_create,
+};
+
+// ============================================================
+// Entry
+// ============================================================
+
+export fn galaya_clap_init(plugin_path: ^byte): bool {
+    clap_bindings_init();
+    gain_setup_strings();
+    return true;
+}
+
+export fn galaya_clap_deinit() {}
+
+export fn galaya_clap_get_factory(factory_id: ^byte): rawptr {
+    if clap_cstr_eq(factory_id, CLAP_PLUGIN_FACTORY_ID) {
+        return cast(rawptr)&gain_factory;
+    }
+    return cast(rawptr)0;
+}
+
+// The host looks up a DATA symbol called `clap_entry`, and `export` only does
+// functions, so the entry struct lives in clap_entry.c. It points at the three
+// exported functions above (galaya_clap_init / _deinit / _get_factory).
